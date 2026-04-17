@@ -2,6 +2,10 @@
 
 import torch
 from dataclasses import dataclass
+
+from fastvideo.attention.attention_weight_dump import (
+    maybe_dump_attention_weights,
+)
 from fastvideo.attention.backends.abstract import (  # FlashAttentionMetadata,
     AttentionBackend, AttentionImpl, AttentionMetadata,
     AttentionMetadataBuilder)
@@ -69,6 +73,8 @@ class SDPAImpl(AttentionImpl):
         self.causal = causal
         self.softmax_scale = softmax_scale
         self.dropout = extra_impl_args.get("dropout_p", 0.0)
+        self.prefix = prefix
+        self.num_heads = num_heads
 
     def forward(
         self,
@@ -96,4 +102,13 @@ class SDPAImpl(AttentionImpl):
         output = torch.nn.functional.scaled_dot_product_attention(
             query, key, value, **attn_kwargs)
         output = output.transpose(1, 2)
+        maybe_dump_attention_weights(
+            query.transpose(1, 2),
+            key.transpose(1, 2),
+            attn_metadata,
+            self.softmax_scale,
+            self.prefix,
+            num_heads=self.num_heads,
+            causal=self.causal,
+        )
         return output

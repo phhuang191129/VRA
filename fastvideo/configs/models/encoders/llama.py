@@ -19,6 +19,9 @@ def _is_final_norm(n: str, m) -> bool:
 
 @dataclass
 class LlamaArchConfig(TextEncoderArchConfig):
+    # Hunyuan (and tests) use layer-skipped hidden states in postprocess; must
+    # match text_encoding.encode_text(..., output_hidden_states=want_hidden_states).
+    output_hidden_states: bool = True
     vocab_size: int = 32000
     hidden_size: int = 4096
     intermediate_size: int = 11008

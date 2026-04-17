@@ -37,14 +37,19 @@ def llama_preprocess_text(prompt: str) -> str:
     return prompt_template_video["template"].format(prompt)
 
 
-def llama_postprocess_text(outputs: BaseEncoderOutput) -> torch.tensor:
+def llama_postprocess_text(
+    outputs: BaseEncoderOutput,
+    attention_mask: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     hidden_state_skip_layer = 2
     assert outputs.hidden_states is not None
     hidden_states: tuple[torch.Tensor, ...] = outputs.hidden_states
-    last_hidden_state: torch.tensor = hidden_states[-(hidden_state_skip_layer +
+    last_hidden_state: torch.Tensor = hidden_states[-(hidden_state_skip_layer +
                                                       1)]
     crop_start = prompt_template_video.get("crop_start", -1)
     last_hidden_state = last_hidden_state[:, crop_start:]
+    if attention_mask is not None:
+        return last_hidden_state, attention_mask
     return last_hidden_state
 
 

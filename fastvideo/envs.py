@@ -21,6 +21,13 @@ if TYPE_CHECKING:
     FASTVIDEO_TRACE_FUNCTION: int = 0
     FASTVIDEO_ATTENTION_BACKEND: str | None = None
     FASTVIDEO_ATTENTION_CONFIG: str | None = None
+    FASTVIDEO_ATTENTION_DUMP_DIR: str | None = None
+    FASTVIDEO_ATTENTION_DUMP_SLICE_LEN: int = 0
+    FASTVIDEO_ATTENTION_DUMP_TARGET_STEP: int | None = None
+    FASTVIDEO_ATTENTION_DUMP_TARGET_HEAD: int | None = None
+    FASTVIDEO_ATTENTION_DUMP_TARGET_BLOCK: str | None = None
+    FASTVIDEO_ATTENTION_DUMP_TARGET_BLOCK_INDEX: int | None = None
+    FASTVIDEO_ATTENTION_DUMP_TARGET_CFG: str = "any"
     FASTVIDEO_WORKER_MULTIPROC_METHOD: str = "spawn"
     FASTVIDEO_TARGET_DEVICE: str = "cuda"
     MAX_JOBS: str | None = None
@@ -211,8 +218,32 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Path to the attention configuration file. Only used for sliding tile
     # attention for now.
     "FASTVIDEO_ATTENTION_CONFIG":
-    lambda: (None if os.getenv("FASTVIDEO_ATTENTION_CONFIG", None) is None else
+        lambda: (None if os.getenv("FASTVIDEO_ATTENTION_CONFIG", None) is None else
              os.path.expanduser(os.getenv("FASTVIDEO_ATTENTION_CONFIG", "."))),
+
+    # If set, FlashAttention / SDPA may save **one** L×L softmax matrix when
+    # FASTVIDEO_ATTENTION_DUMP_TARGET_* variables match (see
+    # fastvideo/attention/attention_weight_dump.py).
+    "FASTVIDEO_ATTENTION_DUMP_DIR":
+        lambda: (None if os.getenv("FASTVIDEO_ATTENTION_DUMP_DIR") is None else
+                 os.path.expanduser(os.getenv("FASTVIDEO_ATTENTION_DUMP_DIR", "."))),
+    # 0 = materialize full sequence length (high memory); else cap L.
+    "FASTVIDEO_ATTENTION_DUMP_SLICE_LEN":
+        lambda: int(os.getenv("FASTVIDEO_ATTENTION_DUMP_SLICE_LEN", "0")),
+    "FASTVIDEO_ATTENTION_DUMP_TARGET_STEP":
+        lambda: (None if os.getenv("FASTVIDEO_ATTENTION_DUMP_TARGET_STEP") is None
+                 else int(os.getenv("FASTVIDEO_ATTENTION_DUMP_TARGET_STEP", "0"))),
+    "FASTVIDEO_ATTENTION_DUMP_TARGET_HEAD":
+        lambda: (None if os.getenv("FASTVIDEO_ATTENTION_DUMP_TARGET_HEAD") is None
+                 else int(os.getenv("FASTVIDEO_ATTENTION_DUMP_TARGET_HEAD", "0"))),
+    "FASTVIDEO_ATTENTION_DUMP_TARGET_BLOCK":
+        lambda: os.getenv("FASTVIDEO_ATTENTION_DUMP_TARGET_BLOCK"),
+    "FASTVIDEO_ATTENTION_DUMP_TARGET_BLOCK_INDEX":
+        lambda: (None
+                 if os.getenv("FASTVIDEO_ATTENTION_DUMP_TARGET_BLOCK_INDEX") is None
+                 else int(os.getenv("FASTVIDEO_ATTENTION_DUMP_TARGET_BLOCK_INDEX", "0"))),
+    "FASTVIDEO_ATTENTION_DUMP_TARGET_CFG":
+        lambda: os.getenv("FASTVIDEO_ATTENTION_DUMP_TARGET_CFG", "any"),
 
     # Use dedicated multiprocess context for workers.
     "FASTVIDEO_WORKER_MULTIPROC_METHOD":

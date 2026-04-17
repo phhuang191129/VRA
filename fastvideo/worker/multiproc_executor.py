@@ -547,6 +547,11 @@ class WorkerMultiprocProc:
         rank = kwargs.get("rank")
 
         try:
+            fv_args = kwargs.get("fastvideo_args")
+            if fv_args is not None:
+                extra_env = getattr(fv_args, "mp_worker_environ_updates", None)
+                if extra_env:
+                    os.environ.update(extra_env)
             worker = WorkerMultiprocProc(*args, **kwargs)
 
             # Send READY once we know everything is loaded

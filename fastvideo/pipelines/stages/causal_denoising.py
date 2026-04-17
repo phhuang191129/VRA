@@ -10,11 +10,13 @@ from fastvideo.pipelines.stages.denoising import DenoisingStage
 from fastvideo.pipelines.stages.validators import StageValidators as V
 from fastvideo.pipelines.stages.validators import VerificationResult
 
+_OPTIONAL_BACKEND_EXC = (ImportError, RuntimeError, OSError)
+
 try:
     from fastvideo.attention.backends.sliding_tile_attn import (
         SlidingTileAttentionBackend)
     st_attn_available = True
-except ImportError:
+except _OPTIONAL_BACKEND_EXC:
     st_attn_available = False
     SlidingTileAttentionBackend = None  # type: ignore
 
@@ -22,7 +24,7 @@ try:
     from fastvideo.attention.backends.video_sparse_attn import (
         VideoSparseAttentionBackend)
     vsa_available = True
-except ImportError:
+except _OPTIONAL_BACKEND_EXC:
     vsa_available = False
     VideoSparseAttentionBackend = None  # type: ignore
 

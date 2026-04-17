@@ -27,25 +27,27 @@ from fastvideo.pipelines.stages.validators import StageValidators as V
 from fastvideo.pipelines.stages.validators import VerificationResult
 from fastvideo.platforms import AttentionBackendEnum
 
+_OPTIONAL_BACKEND_EXC = (ImportError, RuntimeError, OSError)
+
 try:
     from fastvideo.attention.backends.sliding_tile_attn import (
         SlidingTileAttentionBackend)
     st_attn_available = True
-except ImportError:
+except _OPTIONAL_BACKEND_EXC:
     st_attn_available = False
 
 try:
     from fastvideo.attention.backends.vmoba import VMOBAAttentionBackend
     from fastvideo.utils import is_vmoba_available
     vmoba_attn_available = is_vmoba_available()
-except ImportError:
+except _OPTIONAL_BACKEND_EXC:
     vmoba_attn_available = False
 
 try:
     from fastvideo.attention.backends.video_sparse_attn import (
         VideoSparseAttentionBackend)
     vsa_available = True
-except ImportError:
+except _OPTIONAL_BACKEND_EXC:
     vsa_available = False
 
 logger = init_logger(__name__)

@@ -4,6 +4,7 @@
 import argparse
 import dataclasses
 import json
+import os
 from contextlib import contextmanager
 from dataclasses import field
 from enum import Enum
@@ -24,6 +25,16 @@ else:
     PlacementGroup = Any
 
 logger = init_logger(__name__)
+
+
+def _snapshot_attention_env_for_workers() -> dict[str, str]:
+    """Env keys needed in mp child processes for attention dump / backend."""
+    return {
+        k: v
+        for k, v in os.environ.items()
+        if k.startswith("FASTVIDEO_ATTENTION_DUMP")
+        or k == "FASTVIDEO_ATTENTION_BACKEND"
+    }
 
 
 class ExecutionMode(str, Enum):
@@ -97,6 +108,10 @@ class FastVideoArgs:
 
     # Distributed executor backend
     distributed_executor_backend: str = "mp"
+
+    # Applied in multiprocessing workers at startup (attention dump env, etc.).
+    mp_worker_environ_updates: dict[str, str] = field(default_factory=dict,
+                                                     repr=False)
 
     # a few attributes for ray related
     ray_placement_group: PlacementGroup | None = None
@@ -635,6 +650,8 @@ class FastVideoArgs:
                 kwargs['workload_type'] = WorkloadType.from_string(
                     workload_type_value) if isinstance(
                         workload_type_value, str) else workload_type_value
+            elif attr == 'mp_worker_environ_updates':
+                kwargs[attr] = _snapshot_attention_env_for_workers()
             # Use getattr with default value from the dataclass for potentially missing attributes
             else:
                 # Get the field to check if it has a default_factory
@@ -665,6 +682,10 @@ class FastVideoArgs:
 
         kwargs['pipeline_config'] = PipelineConfig.from_kwargs(kwargs)
         kwargs['preprocess_config'] = PreprocessConfig.from_kwargs(kwargs)
+        if "mp_worker_environ_updates" not in kwargs:
+            snap = _snapshot_attention_env_for_workers()
+            if snap:
+                kwargs["mp_worker_environ_updates"] = snap
         return cls(**kwargs)
 
     def check_fastvideo_args(self) -> None:
@@ -950,6 +971,8 @@ class TrainingArgs(FastVideoArgs):
                 kwargs[attr] = WorkloadType.from_string(
                     workload_type_value) if isinstance(
                         workload_type_value, str) else workload_type_value
+            elif attr == 'mp_worker_environ_updates':
+                kwargs[attr] = _snapshot_attention_env_for_workers()
             # Use getattr with default value from the dataclass for potentially missing attributes
             else:
                 # Get the field to check its default value

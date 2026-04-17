@@ -13,6 +13,9 @@ try:
 except ImportError:
     flash_attn_func = flash_attn_2_func
 
+from fastvideo.attention.attention_weight_dump import (
+    maybe_dump_attention_weights,
+)
 from fastvideo.attention.backends.abstract import (AttentionBackend,
                                                    AttentionImpl,
                                                    AttentionMetadata,
@@ -84,6 +87,9 @@ class FlashAttentionImpl(AttentionImpl):
     ) -> None:
         self.causal = causal
         self.softmax_scale = softmax_scale
+        self.prefix = prefix
+        self.num_heads = num_heads
+        self.head_size = head_size
 
     def forward(
         self,
@@ -134,7 +140,7 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 key_padding_mask = _key_padding_mask_from_attn_mask(
                     attn_mask, key.shape[1]).to(device=key.device)
-                return flash_attn_varlen_qk_no_pad(
+                out = flash_attn_varlen_qk_no_pad(
                     query,
                     key,
                     value,
@@ -144,21 +150,30 @@ class FlashAttentionImpl(AttentionImpl):
                     dropout_p=0.0,
                     softmax_scale=self.softmax_scale,
                 )
+            else:
+                qkv = torch.stack([query, key, value], dim=2)
 
-            qkv = torch.stack([query, key, value], dim=2)
-
-            attn_mask = F.pad(attn_mask, (qkv.shape[1] - attn_mask.shape[1], 0),
-                              value=True)
-            output = flash_attn_no_pad(qkv,
-                                       attn_mask,
-                                       causal=False,
-                                       dropout_p=0,
-                                       softmax_scale=None)
+                attn_mask = F.pad(attn_mask, (qkv.shape[1] - attn_mask.shape[1], 0),
+                                  value=True)
+                out = flash_attn_no_pad(qkv,
+                                        attn_mask,
+                                        causal=False,
+                                        dropout_p=0,
+                                        softmax_scale=None)
         else:
-            output = flash_attn_func(
+            out = flash_attn_func(
                 query,  # type: ignore[no-untyped-call]
                 key,
                 value,
                 softmax_scale=self.softmax_scale,
                 causal=self.causal)
-        return output
+        maybe_dump_attention_weights(
+            query,
+            key,
+            attn_metadata,
+            self.softmax_scale,
+            self.prefix,
+            num_heads=self.num_heads,
+            causal=self.causal,
+        )
+        return out
