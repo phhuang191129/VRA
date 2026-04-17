@@ -1,4 +1,11 @@
-# Sliding Tile Attention (STA) Branch
+# Accelearting video generation with VRA
+
+We build our own video generation acceleration algorithm and system based on the [STA](https://github.com/hao-ai-lab/FastVideo/tree/sta_do_not_delete).
+
+
+The following is the original readme from the STA, we will update our own readme later.
+
+Sliding Tile Attention (STA) Branch
 
 This branch is a stash/testing branch for people who want to try
 Sliding Tile Attention (STA). The top-level README is intentionally
