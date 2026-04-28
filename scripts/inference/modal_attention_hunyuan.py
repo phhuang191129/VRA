@@ -50,6 +50,20 @@ OUTPUTS_ROOT = Path("/outputs")
 ATTN_ROOT = Path("/attn_dumps")
 REPO_MOUNT = Path("/FastVideo")
 
+_PASSTHROUGH_ENV_VARS = (
+    "CUDA_LAUNCH_BLOCKING",
+    "FASTVIDEO_STA_FORCE_TRITON",
+    "FASTVIDEO_TORCH_PROFILER_DIR",
+    "FASTVIDEO_TORCH_PROFILER_RECORD_SHAPES",
+    "FASTVIDEO_TORCH_PROFILER_WITH_PROFILE_MEMORY",
+    "FASTVIDEO_TORCH_PROFILER_WITH_STACK",
+    "FASTVIDEO_TORCH_PROFILER_WITH_FLOPS",
+    "FASTVIDEO_TORCH_PROFILER_WAIT_STEPS",
+    "FASTVIDEO_TORCH_PROFILER_WARMUP_STEPS",
+    "FASTVIDEO_TORCH_PROFILER_ACTIVE_STEPS",
+    "FASTVIDEO_TORCH_PROFILE_REGIONS",
+)
+
 
 def _local_repo_for_image_mount() -> Path:
     """Directory to pass to ``add_local_dir`` when defining the Image.
@@ -107,6 +121,18 @@ image = (
         # Match ``pyproject.toml`` / ``[tool.uv.sources]`` (linux → cu128).
         "UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu128 "
         f"uv pip install -e {REPO_MOUNT} --system --index-strategy unsafe-best-match",
+        # Overwrite the PyPI fastvideo-kernel with our in-repo version which
+        # adds ``variable_rate_attention`` (pure-Triton, no CUDA build needed).
+        # Use shutil.copytree with dirs_exist_ok=True so files are merged into
+        # the existing site-packages directory rather than nested inside it
+        # (plain `cp -r src dst` when dst exists copies src *into* dst).
+        "python -c \""
+        "import shutil; "
+        "shutil.copytree("
+        "'/FastVideo/fastvideo-kernel/python/fastvideo_kernel', "
+        "'/usr/local/lib/python3.11/site-packages/fastvideo_kernel', "
+        "dirs_exist_ok=True)"
+        "\"",
     ))
 
 app = modal.App(APP_NAME)
@@ -150,12 +176,20 @@ class HunyuanAttentionRunner:
         target_cfg: str,
         embedded_cfg_scale: float,
         flow_shift: float,
+        vra_sparsity: str,
+        env_overrides: dict[str, str],
+        attention_config: str = "",
     ) -> dict[str, str]:
         env = os.environ.copy()
+        env.update(env_overrides)
         env["HF_HOME"] = str(HF_HOME)
         env["HUGGINGFACE_HUB_CACHE"] = str(HF_HOME / "hub")
         env["TRANSFORMERS_CACHE"] = str(HF_HOME / "transformers")
         env["FASTVIDEO_ATTENTION_BACKEND"] = attention_backend
+        if vra_sparsity:
+            env["FASTVIDEO_VRA_SPARSITY"] = vra_sparsity
+        if attention_config:
+            env["FASTVIDEO_ATTENTION_CONFIG"] = attention_config
 
         out_dir = OUTPUTS_ROOT / "hunyuan_run"
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -230,7 +264,7 @@ def main(
     prompt: str = "A beautiful woman in a red dress walking down a street",
     seed: int = 1024,
     attention_backend: str = "TORCH_SDPA",
-    dump_attention: bool = True,
+    dump_attention: bool = False,
     dump_slice_len: int = 0,
     target_step: int = 0,
     target_head: int = 0,
@@ -239,8 +273,25 @@ def main(
     target_cfg: str = "pos",
     embedded_cfg_scale: float = 6.0,
     flow_shift: float = 7.0,
+    vra_sparsity: str = "58",
+    attention_config: str = "",
 ) -> None:
     print(f"GPU (override with MODAL_HUNYUAN_GPU): {_GPU}")
+    env_overrides = {
+        key: value
+        for key in _PASSTHROUGH_ENV_VARS
+        if (value := os.environ.get(key)) is not None
+    }
+    if attention_backend == "SLIDING_TILE_ATTN":
+        env_overrides.setdefault("FASTVIDEO_STA_FORCE_TRITON", "1")
+    if env_overrides.get("FASTVIDEO_TORCH_PROFILER_WITH_FLOPS", "0") != "0":
+        env_overrides.setdefault("FASTVIDEO_TORCH_PROFILER_DIR",
+                                 str(OUTPUTS_ROOT / "profiler_traces"))
+        env_overrides.setdefault("FASTVIDEO_TORCH_PROFILE_REGIONS",
+                                 "profiler_region_inference_pipeline")
+        env_overrides.setdefault("FASTVIDEO_TORCH_PROFILER_WAIT_STEPS", "0")
+        env_overrides.setdefault("FASTVIDEO_TORCH_PROFILER_WARMUP_STEPS", "0")
+        env_overrides.setdefault("FASTVIDEO_TORCH_PROFILER_ACTIVE_STEPS", "1")
     result = HunyuanAttentionRunner().run_generate.remote(
         model_base=model_base,
         height=height,
@@ -259,8 +310,14 @@ def main(
         target_cfg=target_cfg,
         embedded_cfg_scale=embedded_cfg_scale,
         flow_shift=flow_shift,
+        vra_sparsity=vra_sparsity,
+        env_overrides=env_overrides,
+        attention_config=attention_config,
     )
     print("Done:", result)
-    print(
-        "Fetch attention dumps for local plotting:\n"
-        f"  modal volume get fastvideo-hunyuan-attn dump ./local_attn")
+    if dump_attention:
+        print(
+            "Fetch attention dumps for local plotting:\n"
+            f"  modal volume get fastvideo-hunyuan-attn {result.get('attn_volume_subdir', 'dump')} ./local_attn"
+        )
+

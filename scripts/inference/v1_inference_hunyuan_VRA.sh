@@ -2,17 +2,18 @@
 
 num_gpus=1
 export FASTVIDEO_ATTENTION_CONFIG=assets/mask_strategy_hunyuan.json
-export FASTVIDEO_ATTENTION_BACKEND=SLIDING_TILE_ATTN
 export MODEL_BASE=hunyuanvideo-community/HunyuanVideo
-# export MODEL_BASE=hunyuanvideo-community/HunyuanVideo
+export FASTVIDEO_VRA_SPARSITY="58" 
+export FASTVIDEO_ATTENTION_BACKEND="SLIDING_VARIABLE_RATE_ATTN"
+FASTVIDEO_TORCH_PROFILER_WITH_FLOPS=1
 fastvideo generate \
     --model-path $MODEL_BASE \
     --sp-size ${num_gpus} \
     --tp-size 1 \
     --num-gpus ${num_gpus} \
-    --height 768 \
-    --width 1280 \
-    --num-frames 117 \
+    --height 544 \
+    --width 960 \
+    --num-frames 75 \
     --num-inference-steps 50 \
     --guidance-scale 1 \
     --embedded-cfg-scale 6 \

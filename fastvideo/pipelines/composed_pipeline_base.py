@@ -475,8 +475,14 @@ class ComposedPipelineBase(ABC):
         logger.info("Running pipeline stages: %s",
                     self._stage_name_mapping.keys())
         # logger.info("Batch: %s", batch)
-        for stage in self.stages:
-            batch = stage(batch, fastvideo_args)
+        with self.profiler_controller.region(
+                "profiler_region_inference_pipeline"):
+            for stage in self.stages:
+                batch = stage(batch, fastvideo_args)
+        if self.profiler is not None:
+            self.profiler.step()
+            if envs.FASTVIDEO_TORCH_PROFILER_DIR:
+                self.profiler_controller.stop()
 
         # Return the output
         return batch

@@ -185,6 +185,18 @@ class CudaPlatformBase(Platform):
                     "To install it, please follow the instructions at: "
                     "https://hao-ai-lab.github.io/FastVideo/video_sparse_attention/installation "
                 ) from e
+        elif selected_backend == AttentionBackendEnum.SLIDING_VARIABLE_RATE_ATTN:
+            try:
+                from fastvideo.attention.backends.sliding_variable_rate_attn import (  # noqa: F401
+                    VariableRateAttentionBackend)
+                logger.info("Using Sliding Variable Rate Attention backend.")
+                return "fastvideo.attention.backends.sliding_variable_rate_attn.VariableRateAttentionBackend"
+            except ImportError as e:
+                logger.error(
+                    "Failed to import Sliding Variable Rate Attention backend: %s",
+                    str(e))
+                raise ImportError(
+                    "Sliding Variable Rate Attention backend is not available. ") from e
 
         elif selected_backend == AttentionBackendEnum.VMOBA_ATTN:
             try:
