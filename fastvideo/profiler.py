@@ -127,6 +127,10 @@ register_profiler_region(
     description="Module/model loading during pipeline initialization.",
     default_enabled=False,
 )
+register_profiler_region(
+    name="profiler_region_inference_pipeline",
+    description="End-to-end inference pipeline execution.",
+)
 # register_profiler_region(
 #     name="profiler_region_inference_pre_denoising",
 #     description="Pre-denoising inference steps (conditioning, preprocessing).",

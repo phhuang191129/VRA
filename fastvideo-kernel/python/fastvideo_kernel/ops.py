@@ -1,8 +1,10 @@
 import math
+import os
 import torch
 from .block_sparse_attn import block_sparse_attn
 from .triton_kernels.block_sparse_attn_triton import triton_block_sparse_attn_forward
 from .triton_kernels.st_attn_triton import sliding_tile_attention_triton
+from .triton_kernels.vra_attn_triton import sliding_variable_rate_attention_triton
 from .triton_kernels.index import map_to_index
 
 # Try to load the C++ extension
@@ -25,8 +27,16 @@ def sliding_tile_attention(
     has_text: bool = True,
     seq_shape: str = "30x48x80",
 ) -> torch.Tensor:
+    try:
+        from .block_sparse_attn import _is_sm90
+        is_sm90 = _is_sm90()
+    except ImportError:
+        is_sm90 = False
+
+    force_triton = os.environ.get("FASTVIDEO_STA_FORCE_TRITON", "0") == "1"
+
     # Check if the specific op is available
-    if sta_fwd is None:
+    if force_triton or sta_fwd is None or not is_sm90:
         return sliding_tile_attention_triton(
             q, k, v, window_size, text_length, has_text, seq_shape
         )
@@ -147,3 +157,18 @@ def video_sparse_attn(
     if compress_attn_weight is not None:
         return out_c * compress_attn_weight + out_s
     return out_c + out_s
+
+
+def variable_rate_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    window_size: list,
+    text_length: int,
+    has_text: bool = True,
+    seq_shape: str = "30x48x80",
+) -> torch.Tensor:
+    # We only use Triton implementation for VRA
+    return sliding_variable_rate_attention_triton(
+        q, k, v, window_size, text_length, has_text, seq_shape
+    )

@@ -1,34 +1,69 @@
-# Accelearting video generation with VRA
+# Accelerating Video Generation with VRA
 
-We build our own video generation acceleration algorithm and system based on the [STA](https://github.com/hao-ai-lab/FastVideo/tree/sta_do_not_delete).
+This repository extends [FastVideo](https://github.com/hao-ai-lab/FastVideo) and the [STA](https://github.com/hao-ai-lab/FastVideo/tree/sta_do_not_delete) line with **Variable Rate Attention (VRA)**—a sparse attention backend for DiT-based video models (notably HunyuanVideo)—plus scripts to run **dense FlashAttention 3**, **STA**, and **VRA** locally or on [Modal](https://modal.com), and to **evaluate** generations with [VBench](https://github.com/Vchitect/VBench).
 
+## Repository overview
 
-The following is the original readme from the STA, we will update our own readme later.
+| Area | Path |
+|------|------|
+| Core Python package | `fastvideo/` |
+| Custom / Triton kernels | `fastvideo-kernel/` |
+| Hunyuan inference (local shell) | `scripts/inference/v1_inference_hunyuan*.sh` |
+| Hunyuan on Modal | `scripts/inference/modal_attention_hunyuan.py`, `*_modal.sh` |
+| Modal details (volumes, pricing, dumps) | `scripts/inference/attention_hunyuan_modal.md` |
+| VBench wrapper | `scripts/eval/run_vbench_custom.sh`, `eval/vbench_env/` |
+| STA mask JSON (Hunyuan) | `assets/mask_strategy_hunyuan.json`, `assets/mask_strategy_hunyuan_30_40_40.json`, … |
 
-Sliding Tile Attention (STA) Branch
+---
 
-This branch is a stash/testing branch for people who want to try
-Sliding Tile Attention (STA). The top-level README is intentionally
-STA-only.
+## Attention backends
 
-## What is STA
+### Baseline: FlashAttention 3 (dense)
 
-Sliding Tile Attention is an optimized attention backend for
-window-based video generation.
+Full attention via **`FLASH_ATTN`**. Use this as the quality/speed reference when comparing sparse methods.
 
-- Blog: https://hao-ai-lab.github.io/blogs/sta/
-- Paper: https://arxiv.org/abs/2502.04507
-- In-repo STA docs: `docs/attention/sta/index.md`
+### STA: Sliding Tile Attention
 
-## Setup
+**Sliding Tile Attention** uses a fixed sliding-window style sparsity pattern driven by a mask-strategy JSON (`FASTVIDEO_ATTENTION_CONFIG`). See the [STA blog](https://hao-ai-lab.github.io/blogs/sta/) and [paper](https://arxiv.org/abs/2502.04507); in-repo STA docs live under `docs/attention/sta/index.md`.
 
-Install FastVideo from source:
+### VRA: Variable Rate Attention
+
+**Variable Rate Attention** replaces STA’s uniform sliding window with a **per-query concentric multi-ring mask**: denser KV coverage near the query tile and progressively sparser sampling farther away in space and time.
+
+For each query tile at `(t, h, w)` in the tile grid, KV tiles fall into regions by **relative distance** from the query:
+
+| Region | Role |
+|--------|------|
+| **Core** | Dense cube around the query |
+| **Mid ring** | Stride-sampled (e.g. multiples of 2 on `\|Δt\|, \|Δh\|, \|Δw\|`) |
+| **Outer ring** | Stride-sampled (e.g. multiples of 3) |
+| **Beyond outer** | Skipped |
+
+**Text tokens** use full attention (text sink): text queries see all KV; video queries see all text KV plus VRA-filtered video KV.
+
+**Sparsity presets** (`FASTVIDEO_VRA_SPARSITY`, see `fastvideo/attention/backends/sliding_variable_rate_attn.py`):
+
+| Preset | Notes |
+|--------|--------|
+| `58` | Default-style sparse preset for the supported tile grids |
+| `sta58` | Tuned to approximate STA’s sparse-step tile density (~125 / 300 active tiles on the `30×48×80` grid) |
+| `91` | Very sparse preset |
+
+The tuple format for custom tuning is documented in code comments next to `_VRA_CONFIGS`.
+
+---
+
+## Installation
+
+### Main package (inference)
+
+From the repository root:
 
 ```bash
 uv pip install -e .
 ```
 
-Build the STA kernel package:
+Build the **`fastvideo-kernel`** package when you use backends that rely on it (STA and other compiled paths):
 
 ```bash
 cd fastvideo-kernel
@@ -36,77 +71,118 @@ cd fastvideo-kernel
 cd ..
 ```
 
-## Run STA Inference
+VRA’s variable-rate path is implemented with **Triton** in-tree; Modal bakes the repo and overlays `fastvideo_kernel` without a separate CUDA build for that path (see `modal_attention_hunyuan.py`).
 
-STA backend:
+### Modal (optional)
 
 ```bash
-export FASTVIDEO_ATTENTION_BACKEND=SLIDING_TILE_ATTN
+pip install modal
+modal setup
 ```
 
-Ready-to-run examples:
+Run all `modal run` commands from the **repository root**. For gated Hugging Face checkpoints, create a Modal Secret with `HF_TOKEN` and use `MODAL_USE_HF_SECRET=1` (see `scripts/inference/attention_hunyuan_modal.md`).
 
-- HunyuanVideo: `scripts/inference/v1_inference_hunyuan_STA.sh`
-- Wan2.1-T2V-14B: `scripts/inference/v1_inference_wan_STA.sh`
+### VBench (evaluation)
 
-Run:
+VBench pulls older `transformers` / `tokenizers`; use **Python 3.10 or 3.11** (not 3.12) for `eval/vbench_env`:
+
+```bash
+cd eval/vbench_env
+rm -rf .venv && rm -f uv.lock   # optional: force a fresh lock
+uv venv --python 3.11 && uv lock && uv sync
+```
+
+The eval shell script activates this venv and sets `PYTHONPATH` so `eval/vbench_env/sitecustomize.py` can patch `torch.load` compatibility for VBench.
+
+---
+
+## Running inference
+
+### Environment variables (Hunyuan)
+
+| Variable | Typical values | Purpose |
+|----------|----------------|---------|
+| `FASTVIDEO_ATTENTION_BACKEND` | `FLASH_ATTN`, `SLIDING_TILE_ATTN`, `SLIDING_VARIABLE_RATE_ATTN` | Attention implementation |
+| `FASTVIDEO_ATTENTION_CONFIG` | path to JSON | Required for STA (mask strategy) |
+| `FASTVIDEO_VRA_SPARSITY` | `58`, `sta58`, `91` | VRA preset |
+| `MODAL_HUNYUAN_GPU` | `H100`, `A100-80GB` | Modal GPU type (read before `modal run`) |
+
+### Local (GPU)
+
+**VRA** (edit `FASTVIDEO_VRA_SPARSITY` and `num_gpus` in the script if needed):
+
+```bash
+bash scripts/inference/v1_inference_hunyuan_VRA.sh
+```
+
+**STA**:
 
 ```bash
 bash scripts/inference/v1_inference_hunyuan_STA.sh
-# or
-bash scripts/inference/v1_inference_wan_STA.sh
 ```
 
-Both scripts already set STA-related env vars:
+Uses `assets/mask_strategy_hunyuan.json` by default (resolution in the script: 768×1280, 117 frames).
 
-- `FASTVIDEO_ATTENTION_BACKEND=SLIDING_TILE_ATTN`
-- `FASTVIDEO_ATTENTION_CONFIG` to an STA mask strategy JSON
+**Dense baseline (FlashAttention 3)** — example uses multi-GPU `sp-size`; adjust `num_gpus` for your machine:
 
-## STA Mask Strategy Files
+```bash
+bash scripts/inference/v1_inference_hunyuan.sh
+```
 
-- HunyuanVideo config: `assets/mask_strategy_hunyuan.json`
-- Wan config: `assets/mask_strategy_wan.json`
+Other models / STA examples from upstream: `scripts/inference/v1_inference_wan_STA.sh`, Wan mask search under `examples/inference/sta_mask_search/`.
 
-## STA Mask Search (Wan2.1-T2V-14B)
+### Modal (cloud GPU)
 
-Run mask search + tuning from repo root:
+Wrapper scripts call `modal run scripts/inference/modal_attention_hunyuan.py` with the right backend flags. Examples:
+
+| Script | Backend |
+|--------|---------|
+| `scripts/inference/v1_inference_hunyuan_FA3_modal.sh` | `FLASH_ATTN` |
+| `scripts/inference/v1_inference_hunyuan_STA_modal.sh` | `SLIDING_TILE_ATTN` + `assets/mask_strategy_hunyuan_30_40_40.json` |
+| `scripts/inference/v1_inference_hunyuan_VRA_modal.sh` | `SLIDING_VARIABLE_RATE_ATTN` + `--vra-sparsity` (default `sta58` in the script) |
+
+```bash
+export MODAL_HUNYUAN_GPU=H100   # optional
+uv run bash scripts/inference/v1_inference_hunyuan_VRA_modal.sh
+```
+
+Artifacts are written under Modal **Volumes** (e.g. `fastvideo-hunyuan-outputs` → `/outputs/hunyuan_run/` in the container). Download with `modal volume get` (see `attention_hunyuan_modal.md`). For evaluation below, copy or save resulting **`.mp4`** files into the layout VBench expects.
+
+---
+
+## Evaluation (VBench)
+
+`scripts/eval/run_vbench_custom.sh` runs VBench **`custom_input`** mode on six dimensions for videos under:
+
+- `result/sta/` — STA (or any baseline you want to label “sta” for this run)
+- `result/vra/` — VRA
+
+Each directory may contain one or more `.mp4` files. Outputs go to `result/vbench_results/<folder>/<dimension>/`.
+
+**Prerequisite:** `eval/vbench_env/.venv` created as in [VBench (evaluation)](#vbench-evaluation).
+
+**Run:**
+
+```bash
+./scripts/eval/run_vbench_custom.sh
+```
+
+Optional parallelism:
+
+```bash
+VBENCH_NGPUS=4 ./scripts/eval/run_vbench_custom.sh
+```
+
+Dimensions evaluated: `subject_consistency`, `background_consistency`, `motion_smoothness`, `dynamic_degree`, `aesthetic_quality`, `imaging_quality`. To score a **FlashAttention** baseline alongside STA/VRA, add a folder (e.g. `result/fa3/`) and extend the `for folder in …` loop in the script, or run `vbench evaluate` manually with the same flags.
+
+---
+
+## Original STA documentation (upstream)
+
+STA mask strategy files for Hunyuan / Wan include `assets/mask_strategy_hunyuan.json` and `assets/mask_strategy_wan.json`. Wan mask search:
 
 ```bash
 bash examples/inference/sta_mask_search/inference_wan_sta.sh
 ```
 
-What this script does:
-
-- Runs `STA_searching` first.
-- Runs `STA_tuning` next (`skip_time_steps=12` by default).
-- Uses prompt shards from `assets/prompt_0.txt` to `assets/prompt_7.txt`.
-
-Important notes:
-
-- Default script is set to 8 GPUs (`num_gpu=8`). If needed, edit
-  `examples/inference/sta_mask_search/inference_wan_sta.sh`.
-- STA searching/tuning currently supports `69x768x1280` (Wan setting).
-
-Generated files:
-
-- Search results: `output/mask_search_result_pos_1280x768/`
-- Tuned strategy: `output/mask_search_strategy_1280x768/mask_strategy_s12.json`
-
-Use the tuned mask for STA inference:
-
-```bash
-export FASTVIDEO_ATTENTION_BACKEND=SLIDING_TILE_ATTN
-export FASTVIDEO_ATTENTION_CONFIG=output/mask_search_strategy_1280x768/mask_strategy_s12.json
-python examples/inference/sta_mask_search/wan_example.py --STA_mode STA_inference --num_gpus 1
-```
-
-## Citation
-
-```bibtex
-@article{zhang2025fast,
-  title={Fast video generation with sliding tile attention},
-  author={Zhang, Peiyuan and Chen, Yongqi and Su, Runlong and Ding, Hangliang and Stoica, Ion and Liu, Zhengzhong and Zhang, Hao},
-  journal={arXiv preprint arXiv:2502.04507},
-  year={2025}
-}
-```
+(Default script often targets 8 GPUs; see that script’s comments.)

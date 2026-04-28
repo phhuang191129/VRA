@@ -1,0 +1,35 @@
+[project]
+name = "vbench-env"
+version = "0"
+# VBench -> transformers 4.33 -> tokenizers 0.13.3 has no cp312 wheels; a source
+# build fails on current Rust. Use CPython 3.10 or 3.11, e.g.:
+#   cd eval/vbench_env && rm -rf .venv && uv venv --python 3.11 && uv sync
+requires-python = ">=3.10,<3.12"
+dependencies = [
+  "vbench==0.1.5",
+  "torch",
+  "torchvision",
+]
+
+[tool.uv]
+prerelease = "allow"
+
+[tool.uv.sources]
+torch = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+torchvision = [
+  { index = "pytorch-cpu", marker = "sys_platform != 'linux'" },
+  { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

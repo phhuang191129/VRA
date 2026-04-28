@@ -217,6 +217,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
 
     # Path to the attention configuration file. Only used for sliding tile
     # attention for now.
+    # Environment variable to control the VRA backend preset (e.g. "58" or "91")
+    "FASTVIDEO_VRA_SPARSITY":
+    lambda: os.getenv("FASTVIDEO_VRA_SPARSITY", "58"),
+
     "FASTVIDEO_ATTENTION_CONFIG":
         lambda: (None if os.getenv("FASTVIDEO_ATTENTION_CONFIG", None) is None else
              os.path.expanduser(os.getenv("FASTVIDEO_ATTENTION_CONFIG", "."))),
