@@ -1,10 +1,15 @@
 import math
 import os
 import torch
+import torch.nn.functional as F
 from .block_sparse_attn import block_sparse_attn
 from .triton_kernels.block_sparse_attn_triton import triton_block_sparse_attn_forward
 from .triton_kernels.st_attn_triton import sliding_tile_attention_triton
 from .triton_kernels.vra_attn_triton import sliding_variable_rate_attention_triton
+try:
+    from .triton_kernels.vra_attn_triton import variable_rate_attention_triton
+except ImportError:
+    variable_rate_attention_triton = None
 from .triton_kernels.index import map_to_index
 
 # Try to load the C++ extension
@@ -13,10 +18,22 @@ try:
     sta_fwd = getattr(fastvideo_kernel_ops, "sta_fwd", None)
     block_sparse_fwd = getattr(fastvideo_kernel_ops, "block_sparse_fwd", None)
     block_sparse_bwd = getattr(fastvideo_kernel_ops, "block_sparse_bwd", None)
+    vra_pack_kv = getattr(fastvideo_kernel_ops, "vra_pack_kv", None)
+    packed_attn_h100 = getattr(fastvideo_kernel_ops, "packed_attn_h100", None)
+    dense_attn_h100_valid_kv = getattr(fastvideo_kernel_ops,
+                                       "dense_attn_h100_valid_kv", None)
+    stride3_attn_h100 = getattr(fastvideo_kernel_ops, "stride3_attn_h100", None)
+    mixed_vra_attn_h100 = getattr(fastvideo_kernel_ops, "mixed_vra_attn_h100",
+                                  None)
 except ImportError:
     sta_fwd = None
     block_sparse_fwd = None
     block_sparse_bwd = None
+    vra_pack_kv = None
+    packed_attn_h100 = None
+    dense_attn_h100_valid_kv = None
+    stride3_attn_h100 = None
+    mixed_vra_attn_h100 = None
 
 def sliding_tile_attention(
     q: torch.Tensor,
@@ -146,7 +163,7 @@ def video_sparse_attn(
                             dtype=torch.bool).scatter_(-1, topk_idx, True)
 
     idx, num = map_to_index(mask)
-    
+
     if block_sparse_fwd is not None:
         # Use autograd-enabled wrapper so backward works (and still uses SM90 kernel when available)
         out_s = block_sparse_attn(q, k, v, mask, variable_block_sizes)[0]
@@ -163,12 +180,317 @@ def variable_rate_attention(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
-    window_size: list,
-    text_length: int,
+    window_size: list | None = None,
+    text_length: int = 0,
     has_text: bool = True,
     seq_shape: str = "30x48x80",
+    dense_radius: list[int] | tuple[int, int, int] | None = None,
+    mid_radius: list[int] | tuple[int, int, int] | None = None,
 ) -> torch.Tensor:
-    # We only use Triton implementation for VRA
-    return sliding_variable_rate_attention_triton(
-        q, k, v, window_size, text_length, has_text, seq_shape
+    if window_size is not None:
+        return sliding_variable_rate_attention_triton(
+            q, k, v, window_size, text_length, has_text, seq_shape)
+    if dense_radius is None or mid_radius is None:
+        raise ValueError(
+            "variable_rate_attention requires either window_size or "
+            "dense_radius/mid_radius")
+    if variable_rate_attention_triton is None:
+        raise RuntimeError(
+            "dense_radius/mid_radius VRA Triton fallback is unavailable; "
+            "use the window_size API or native H100 path")
+    return variable_rate_attention_triton(
+        q,
+        k,
+        v,
+        dense_radius=dense_radius,
+        mid_radius=mid_radius,
+        text_length=text_length,
+        has_text=has_text,
+        seq_shape=seq_shape,
+    )
+
+
+def has_native_vra_pack() -> bool:
+    return vra_pack_kv is not None
+
+
+def has_packed_attn_h100() -> bool:
+    return packed_attn_h100 is not None
+
+
+def has_stride3_attn_h100() -> bool:
+    return stride3_attn_h100 is not None
+
+
+def has_mixed_vra_attn_h100() -> bool:
+    return mixed_vra_attn_h100 is not None
+
+
+def _pack_kv_by_stride(
+    x: torch.Tensor,
+    img_seq_len: int,
+    text_length: int,
+    stride: int,
+) -> torch.Tensor:
+    if vra_pack_kv is not None and x.is_cuda and x.is_contiguous():
+        return vra_pack_kv(x, img_seq_len, text_length, stride)
+
+    image_idx = torch.arange(0, img_seq_len, stride, device=x.device)
+    if text_length:
+        text_idx = torch.arange(img_seq_len,
+                                img_seq_len + text_length,
+                                device=x.device)
+        kv_idx = torch.cat([image_idx, text_idx])
+    else:
+        kv_idx = image_idx
+    return x.index_select(2, kv_idx).contiguous()
+
+
+def packed_stride_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    stride: int = 3,
+    text_length: int = 0,
+    has_text: bool = False,
+    seq_shape: str = "30x48x80",
+) -> torch.Tensor:
+    if stride <= 0:
+        raise ValueError(f"stride must be positive, got {stride}")
+    shape = tuple(int(part) for part in seq_shape.lower().split("x"))
+    if len(shape) != 3:
+        raise ValueError(f"seq_shape must be T x H x W, got {seq_shape!r}")
+    img_seq_len = shape[0] * shape[1] * shape[2]
+    expected_seq_len = img_seq_len + (text_length if has_text else 0)
+    if q.shape != k.shape or q.shape != v.shape:
+        raise ValueError("q, k, and v must have identical shapes")
+    if q.shape[2] != expected_seq_len:
+        raise ValueError(
+            f"expected seq_len={expected_seq_len}, got {q.shape[2]}")
+
+    packed_text_length = text_length if has_text else 0
+    k_packed = _pack_kv_by_stride(k.contiguous(), img_seq_len,
+                                  packed_text_length, stride)
+    v_packed = _pack_kv_by_stride(v.contiguous(), img_seq_len,
+                                  packed_text_length, stride)
+    if not has_text or text_length == 0:
+        return F.scaled_dot_product_attention(q, k_packed, v_packed)
+
+    image_out = F.scaled_dot_product_attention(q[:, :, :img_seq_len],
+                                               k_packed, v_packed)
+    text_out = F.scaled_dot_product_attention(q[:, :, img_seq_len:], k, v)
+    return torch.cat([image_out, text_out], dim=2)
+
+
+def packed_stride_attention_h100(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    stride: int = 3,
+    text_length: int = 0,
+    has_text: bool = False,
+    seq_shape: str = "30x48x80",
+) -> torch.Tensor:
+    if packed_attn_h100 is None:
+        raise RuntimeError("packed_attn_h100 extension is not available")
+    if has_text or text_length:
+        raise NotImplementedError(
+            "packed_stride_attention_h100 currently supports image-only inputs")
+
+    shape = tuple(int(part) for part in seq_shape.lower().split("x"))
+    if len(shape) != 3:
+        raise ValueError(f"seq_shape must be T x H x W, got {seq_shape!r}")
+    img_seq_len = shape[0] * shape[1] * shape[2]
+    if q.shape != k.shape or q.shape != v.shape:
+        raise ValueError("q, k, and v must have identical shapes")
+    if q.shape[2] != img_seq_len:
+        raise ValueError(
+            f"expected image seq_len={img_seq_len}, got {q.shape[2]}")
+
+    k_packed = _pack_kv_by_stride(k.contiguous(), img_seq_len, 0, stride)
+    v_packed = _pack_kv_by_stride(v.contiguous(), img_seq_len, 0, stride)
+    return packed_attn_h100(q.contiguous(), k_packed, v_packed)
+
+
+def fused_stride3_attention_h100(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    text_length: int = 0,
+    has_text: bool = False,
+    seq_shape: str = "30x48x80",
+) -> torch.Tensor:
+    if stride3_attn_h100 is None:
+        raise RuntimeError("stride3_attn_h100 extension is not available")
+    if has_text or text_length:
+        raise NotImplementedError(
+            "fused_stride3_attention_h100 currently supports image-only inputs")
+
+    shape = tuple(int(part) for part in seq_shape.lower().split("x"))
+    if len(shape) != 3:
+        raise ValueError(f"seq_shape must be T x H x W, got {seq_shape!r}")
+    img_seq_len = shape[0] * shape[1] * shape[2]
+    if q.shape != k.shape or q.shape != v.shape:
+        raise ValueError("q, k, and v must have identical shapes")
+    if q.shape[2] != img_seq_len:
+        raise ValueError(
+            f"expected image seq_len={img_seq_len}, got {q.shape[2]}")
+
+    return stride3_attn_h100(q.contiguous(), k.contiguous(), v.contiguous())
+
+
+def _parse_vra_seq_shape(seq_shape: str) -> tuple[int, int, int]:
+    shape = tuple(int(part) for part in seq_shape.lower().split("x"))
+    if len(shape) != 3:
+        raise ValueError(f"seq_shape must be T x H x W, got {seq_shape!r}")
+    return shape  # type: ignore[return-value]
+
+
+def _tile_grid_for_seq_shape(seq_shape: str) -> tuple[int, int, int]:
+    t, h, w = _parse_vra_seq_shape(seq_shape)
+    if t % 6 or h % 8 or w % 8:
+        raise ValueError(
+            f"seq_shape={seq_shape!r} must be divisible by tile shape 6x8x8")
+    return t // 6, h // 8, w // 8
+
+
+def _ceil_to_multiple(value: int, multiple: int) -> int:
+    return ((value + multiple - 1) // multiple) * multiple
+
+
+def _pad_sequence_rows(x: torch.Tensor, target_rows: int) -> torch.Tensor:
+    if x.shape[2] == target_rows:
+        return x.contiguous()
+    if x.shape[2] > target_rows:
+        raise ValueError(
+            f"cannot pad sequence with rows={x.shape[2]} down to {target_rows}")
+    pad_rows = target_rows - x.shape[2]
+    padding = x.new_zeros(*x.shape[:2], pad_rows, x.shape[3])
+    return torch.cat([x.contiguous(), padding], dim=2)
+
+
+def _h100_text_mode(grid_t: int) -> str:
+    mode = os.environ.get("FASTVIDEO_VRA_H100_TEXT_MODE", "auto").lower()
+    if mode not in ("auto", "fused", "separate"):
+        raise ValueError(
+            "FASTVIDEO_VRA_H100_TEXT_MODE must be one of auto/fused/separate")
+    if mode != "auto":
+        return mode
+    if grid_t >= 5 and dense_attn_h100_valid_kv is not None:
+        return "separate"
+    return "fused"
+
+
+def mixed_vra_attention_h100(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    dense_radius: list[int] | tuple[int, int, int],
+    mid_radius: list[int] | tuple[int, int, int],
+    text_length: int = 0,
+    has_text: bool = False,
+    seq_shape: str = "30x48x80",
+) -> torch.Tensor:
+    if has_text or text_length:
+        if mixed_vra_attn_h100 is None:
+            raise RuntimeError("mixed_vra_attn_h100 extension is not available")
+        if len(dense_radius) != 3 or len(mid_radius) != 3:
+            raise ValueError(
+                "dense_radius and mid_radius must be length-3 values")
+
+        shape = _parse_vra_seq_shape(seq_shape)
+        img_seq_len = shape[0] * shape[1] * shape[2]
+        expected_seq_len = img_seq_len + text_length
+        if q.shape != k.shape or q.shape != v.shape:
+            raise ValueError("q, k, and v must have identical shapes")
+        if q.shape[2] != expected_seq_len:
+            raise ValueError(
+                f"expected seq_len={expected_seq_len}, got {q.shape[2]}")
+
+        grid_t, grid_h, grid_w = _tile_grid_for_seq_shape(seq_shape)
+        padded_text_len = _ceil_to_multiple(text_length, 128)
+        padded_kv_rows = img_seq_len + padded_text_len
+        k_padded = _pad_sequence_rows(k, padded_kv_rows)
+        v_padded = _pad_sequence_rows(v, padded_kv_rows)
+
+        text_mode = _h100_text_mode(grid_t)
+        if text_mode == "separate":
+            if dense_attn_h100_valid_kv is None:
+                raise RuntimeError(
+                    "FASTVIDEO_VRA_H100_TEXT_MODE=separate requires "
+                    "dense_attn_h100_valid_kv")
+            image_out = mixed_vra_attn_h100(
+                q[:, :, :img_seq_len].contiguous(),
+                k_padded,
+                v_padded,
+                int(dense_radius[0]),
+                int(dense_radius[1]),
+                int(dense_radius[2]),
+                int(mid_radius[0]),
+                int(mid_radius[1]),
+                int(mid_radius[2]),
+                grid_t,
+                grid_h,
+                grid_w,
+                int(text_length),
+            )
+            padded_text_q_rows = _ceil_to_multiple(text_length, 64)
+            q_text_padded = _pad_sequence_rows(
+                q[:, :, img_seq_len:].contiguous(), padded_text_q_rows)
+            text_out_padded = dense_attn_h100_valid_kv(
+                q_text_padded,
+                k_padded,
+                v_padded,
+                expected_seq_len,
+            )
+            return torch.cat(
+                [image_out, text_out_padded[:, :, :text_length]], dim=2)
+
+        padded_q_rows = img_seq_len + _ceil_to_multiple(text_length, 64)
+        q_padded = _pad_sequence_rows(q, padded_q_rows)
+        out_padded = mixed_vra_attn_h100(
+            q_padded,
+            k_padded,
+            v_padded,
+            int(dense_radius[0]),
+            int(dense_radius[1]),
+            int(dense_radius[2]),
+            int(mid_radius[0]),
+            int(mid_radius[1]),
+            int(mid_radius[2]),
+            grid_t,
+            grid_h,
+            grid_w,
+            int(text_length),
+        )
+        return out_padded[:, :, :expected_seq_len].contiguous()
+
+    if mixed_vra_attn_h100 is None:
+        raise RuntimeError("mixed_vra_attn_h100 extension is not available")
+    if len(dense_radius) != 3 or len(mid_radius) != 3:
+        raise ValueError("dense_radius and mid_radius must be length-3 values")
+
+    shape = _parse_vra_seq_shape(seq_shape)
+    img_seq_len = shape[0] * shape[1] * shape[2]
+    grid_t, grid_h, grid_w = _tile_grid_for_seq_shape(seq_shape)
+    if q.shape != k.shape or q.shape != v.shape:
+        raise ValueError("q, k, and v must have identical shapes")
+    if q.shape[2] != img_seq_len:
+        raise ValueError(
+            f"expected image seq_len={img_seq_len}, got {q.shape[2]}")
+
+    return mixed_vra_attn_h100(
+        q.contiguous(),
+        k.contiguous(),
+        v.contiguous(),
+        int(dense_radius[0]),
+        int(dense_radius[1]),
+        int(dense_radius[2]),
+        int(mid_radius[0]),
+        int(mid_radius[1]),
+        int(mid_radius[2]),
+        grid_t,
+        grid_h,
+        grid_w,
+        0,
     )

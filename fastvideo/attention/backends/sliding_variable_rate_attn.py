@@ -4,8 +4,9 @@ from functools import lru_cache
 from typing import Any
 
 import torch
+import torch.nn.functional as F
 from einops import rearrange
-from fastvideo_kernel.ops import variable_rate_attention
+from fastvideo_kernel.ops import mixed_vra_attention_h100, variable_rate_attention
 
 import fastvideo.envs as envs
 from fastvideo.attention.backends.abstract import (AttentionBackend,
@@ -319,6 +320,8 @@ class VariableRateAttentionImpl(AttentionImpl):
                 self.calculate_ideal_sparsity())
             logger.info(f"[VRA] Config: {self.vra_config}")
             logger.info(
+                f"[VRA] Kernel backend: {envs.FASTVIDEO_VRA_KERNEL_BACKEND}")
+            logger.info(
                 f"[VRA] Sparse-step average sparsity ~{sparsity * 100:.1f}% "
                 f"({comp:.1f} active / {tot} total tiles, "
                 f"range {min_comp}-{max_comp})")
@@ -347,25 +350,57 @@ class VariableRateAttentionImpl(AttentionImpl):
         key = k.transpose(1, 2).contiguous()
         value = v.transpose(1, 2).contiguous()
 
-        head_num = query.size(1)
-
         current_timestep = (
             attn_metadata.current_timestep if attn_metadata is not None else
             get_forward_context().current_timestep)
 
-        if current_timestep < 12:
-            # Match STA: keep full attention for early diffusion steps.
-            nt, nh, nw = self.full_window_size
-            full_window = (nt, nh, nw, nt, nh, nw, nt, nh, nw, 1, 1)
-            windows = [full_window for _ in range(head_num)]
-        else:
-            # Broadcast the same VRA config to all heads uniformly for later steps.
-            windows = [self.vra_config for _ in range(head_num)]
+        kernel_backend = str(envs.FASTVIDEO_VRA_KERNEL_BACKEND).lower()
+        if kernel_backend not in ("h100", "native_h100", "triton"):
+            raise ValueError(
+                "FASTVIDEO_VRA_KERNEL_BACKEND must be 'h100' or 'triton', "
+                f"got {envs.FASTVIDEO_VRA_KERNEL_BACKEND!r}")
 
-        hidden_states = variable_rate_attention(
-            query, key, value, windows,
-            text_length, has_text,
-            self.dit_seq_shape_str,
-        ).transpose(1, 2)
+        if current_timestep < 12:
+            # Match STA/VRA policy: keep full attention for early diffusion
+            # steps.
+            if kernel_backend == "triton":
+                nt, nh, nw = self.full_window_size
+                full_window = (nt, nh, nw, nt, nh, nw, nt, nh, nw, 1, 1)
+                windows = [full_window for _ in range(query.size(1))]
+                hidden_states = variable_rate_attention(
+                    query,
+                    key,
+                    value,
+                    windows,
+                    text_length,
+                    has_text,
+                    self.dit_seq_shape_str,
+                ).transpose(1, 2)
+            else:
+                hidden_states = F.scaled_dot_product_attention(
+                    query, key, value).transpose(1, 2)
+        else:
+            if kernel_backend == "triton":
+                windows = [self.vra_config for _ in range(query.size(1))]
+                hidden_states = variable_rate_attention(
+                    query,
+                    key,
+                    value,
+                    windows,
+                    text_length,
+                    has_text,
+                    self.dit_seq_shape_str,
+                ).transpose(1, 2)
+            else:
+                hidden_states = mixed_vra_attention_h100(
+                    query,
+                    key,
+                    value,
+                    dense_radius=(1, 1, 1),
+                    mid_radius=(2, 2, 3),
+                    text_length=text_length,
+                    has_text=has_text,
+                    seq_shape=self.dit_seq_shape_str,
+                ).transpose(1, 2)
 
         return hidden_states

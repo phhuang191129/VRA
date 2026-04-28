@@ -221,6 +221,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "FASTVIDEO_VRA_SPARSITY":
     lambda: os.getenv("FASTVIDEO_VRA_SPARSITY", "58"),
 
+    # Kernel implementation used by SLIDING_VARIABLE_RATE_ATTN.
+    # - "h100": native mixed_vra_attention_h100 kernel
+    # - "triton": algorithm-side window-config Triton VRA
+    "FASTVIDEO_VRA_KERNEL_BACKEND":
+    lambda: os.getenv("FASTVIDEO_VRA_KERNEL_BACKEND", "h100"),
+
     "FASTVIDEO_ATTENTION_CONFIG":
         lambda: (None if os.getenv("FASTVIDEO_ATTENTION_CONFIG", None) is None else
              os.path.expanduser(os.getenv("FASTVIDEO_ATTENTION_CONFIG", "."))),

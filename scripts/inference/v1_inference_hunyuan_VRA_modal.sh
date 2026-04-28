@@ -15,11 +15,13 @@ unset FASTVIDEO_TORCH_PROFILER_DIR
 echo "Running HunyuanVideo VRA on Modal targeting ~${SPARSITY}% sparsity..."
 
 # Run Modal. This command executes the modal script remotely, passing the VRA backend parameters.
-# NOTE: VRA does not require the custom C++ kernel compiled (it uses pure Triton), 
-# so the default Modal image handles it natively.
+# The VRA attention backend can dispatch either to the algorithm-side Triton
+# prototype or to our native H100 kernel. This end-to-end script selects the
+# optimized native H100 path explicitly.
 modal run scripts/inference/modal_attention_hunyuan.py \
   --attention-backend "SLIDING_VARIABLE_RATE_ATTN" \
   --vra-sparsity "${SPARSITY}" \
+  --vra-kernel-backend "h100" \
   --prompt "${PROMPT}" \
   --height 768 \
   --width 1280 \
@@ -28,6 +30,5 @@ modal run scripts/inference/modal_attention_hunyuan.py \
   --embedded-cfg-scale 6 \
   --flow-shift 7 \
   --target-cfg "pos" 
-
 
 

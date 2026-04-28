@@ -22,11 +22,16 @@ extern std::vector<torch::Tensor> block_sparse_attention_backward(
 );
 #endif
 
+#ifdef TK_COMPILE_PACKED_ATTN_H100
+void register_packed_attn_h100(pybind11::module_ &);
+#endif
+
 // TurboDiffusion kernels
 void register_quant(pybind11::module_ &);
 void register_rms_norm(pybind11::module_ &);
 void register_layer_norm(pybind11::module_ &);
 void register_gemm(pybind11::module_ &);
+void register_vra_pack(pybind11::module_ &);
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.doc() = "FastVideo CUDA Kernels";
@@ -40,9 +45,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     m.def("block_sparse_bwd", torch::wrap_pybind_function(block_sparse_attention_backward), "block sparse attention backward (Hopper)");
 #endif
 
+#ifdef TK_COMPILE_PACKED_ATTN_H100
+    register_packed_attn_h100(m);
+#endif
+
     // TurboDiffusion
     register_quant(m);
     register_rms_norm(m);
     register_layer_norm(m);
     register_gemm(m);
+    register_vra_pack(m);
 }
