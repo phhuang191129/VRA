@@ -127,6 +127,7 @@ if(BUILD_CXX_KERNELS)
         csrc/turbodiffusion/norm/rmsnorm.cu
         csrc/turbodiffusion/norm/layernorm.cu
         csrc/turbodiffusion/quant/quant.cu
+        csrc/attention/vra_pack.cu
     )
     
     # Conditionally add TK kernels
@@ -134,6 +135,7 @@ if(BUILD_CXX_KERNELS)
         list(APPEND EXTENSION_SOURCES
             csrc/attention/st_attn_h100.cu
             csrc/attention/block_sparse_h100.cu
+            csrc/attention/packed_attn_h100.cu
         )
     endif()
 
@@ -146,7 +148,7 @@ if(BUILD_CXX_KERNELS)
     # Build compile definitions list
     set(COMPILE_DEFS TORCH_EXTENSION_NAME=fastvideo_kernel_ops)
     if(ENABLE_TK_KERNELS)
-        list(APPEND COMPILE_DEFS TK_COMPILE_ST_ATTN TK_COMPILE_BLOCK_SPARSE)
+        list(APPEND COMPILE_DEFS TK_COMPILE_ST_ATTN TK_COMPILE_BLOCK_SPARSE TK_COMPILE_PACKED_ATTN_H100)
     endif()
 
     target_compile_definitions(fastvideo_kernel_ops PRIVATE ${COMPILE_DEFS})
@@ -182,4 +184,3 @@ if(BUILD_CXX_KERNELS)
     # We install it to fastvideo_kernel/_C so we can load it to register the ops
     install(TARGETS fastvideo_kernel_ops LIBRARY DESTINATION fastvideo_kernel/_C)
 endif()
-

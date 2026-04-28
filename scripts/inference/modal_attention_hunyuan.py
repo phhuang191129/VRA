@@ -53,6 +53,7 @@ REPO_MOUNT = Path("/FastVideo")
 _PASSTHROUGH_ENV_VARS = (
     "CUDA_LAUNCH_BLOCKING",
     "FASTVIDEO_STA_FORCE_TRITON",
+    "FASTVIDEO_VRA_KERNEL_BACKEND",
     "FASTVIDEO_TORCH_PROFILER_DIR",
     "FASTVIDEO_TORCH_PROFILER_RECORD_SHAPES",
     "FASTVIDEO_TORCH_PROFILER_WITH_PROFILE_MEMORY",
@@ -91,15 +92,21 @@ if os.environ.get("MODAL_USE_HF_SECRET", "0") == "1":
     _HF_SECRETS.append(modal.Secret.from_name(_sn))
 
 image = (
-    modal.Image.debian_slim(python_version="3.11").apt_install(
+    modal.Image.from_registry(
+        "nvidia/cuda:12.8.1-devel-ubuntu22.04",
+        add_python="3.11",
+    ).apt_install(
         "git",
+        "build-essential",
         "ffmpeg",
         "libglib2.0-0",
         "libsm6",
         "libxext6",
     ).env({
+        "CUDA_HOME": "/usr/local/cuda",
         "HF_XET_HIGH_PERFORMANCE": "1",
         "TOKENIZERS_PARALLELISM": "false",
+        "TORCH_CUDA_ARCH_LIST": "9.0a",
     }).add_local_dir(
         str(_REPO_ROOT),
         remote_path=str(REPO_MOUNT),
@@ -115,24 +122,20 @@ image = (
             "**/.pytest_cache/**",
             "**/*.npz",
             "**/outputs_video/**",
+            "**/fastvideo-kernel/benchmarks/vra_batch_logs/**",
+            "**/fastvideo-kernel/benchmarks/vra_batch_outputs/**",
         ],
     ).run_commands(
         "python -m pip install -U pip setuptools wheel uv",
         # Match ``pyproject.toml`` / ``[tool.uv.sources]`` (linux → cu128).
         "UV_EXTRA_INDEX_URL=https://download.pytorch.org/whl/cu128 "
         f"uv pip install -e {REPO_MOUNT} --system --index-strategy unsafe-best-match",
-        # Overwrite the PyPI fastvideo-kernel with our in-repo version which
-        # adds ``variable_rate_attention`` (pure-Triton, no CUDA build needed).
-        # Use shutil.copytree with dirs_exist_ok=True so files are merged into
-        # the existing site-packages directory rather than nested inside it
-        # (plain `cp -r src dst` when dst exists copies src *into* dst).
-        "python -c \""
-        "import shutil; "
-        "shutil.copytree("
-        "'/FastVideo/fastvideo-kernel/python/fastvideo_kernel', "
-        "'/usr/local/lib/python3.11/site-packages/fastvideo_kernel', "
-        "dirs_exist_ok=True)"
-        "\"",
+        "python -m pip install pytest numpy einops scikit-build-core cmake ninja",
+        "python -m pip uninstall -y fastvideo-kernel",
+        "cd /FastVideo/fastvideo-kernel && "
+        "CC=gcc CXX=g++ CUDACXX=/usr/local/cuda/bin/nvcc "
+        "CMAKE_ARGS='-DFASTVIDEO_KERNEL_BUILD_TK=ON -DCMAKE_CUDA_ARCHITECTURES=90a' "
+        "python -m pip install . -v --no-build-isolation",
     ))
 
 app = modal.App(APP_NAME)
@@ -177,6 +180,7 @@ class HunyuanAttentionRunner:
         embedded_cfg_scale: float,
         flow_shift: float,
         vra_sparsity: str,
+        vra_kernel_backend: str,
         env_overrides: dict[str, str],
         attention_config: str = "",
     ) -> dict[str, str]:
@@ -188,6 +192,8 @@ class HunyuanAttentionRunner:
         env["FASTVIDEO_ATTENTION_BACKEND"] = attention_backend
         if vra_sparsity:
             env["FASTVIDEO_VRA_SPARSITY"] = vra_sparsity
+        if vra_kernel_backend:
+            env["FASTVIDEO_VRA_KERNEL_BACKEND"] = vra_kernel_backend
         if attention_config:
             env["FASTVIDEO_ATTENTION_CONFIG"] = attention_config
 
@@ -274,6 +280,7 @@ def main(
     embedded_cfg_scale: float = 6.0,
     flow_shift: float = 7.0,
     vra_sparsity: str = "58",
+    vra_kernel_backend: str = "h100",
     attention_config: str = "",
 ) -> None:
     print(f"GPU (override with MODAL_HUNYUAN_GPU): {_GPU}")
@@ -311,6 +318,7 @@ def main(
         embedded_cfg_scale=embedded_cfg_scale,
         flow_shift=flow_shift,
         vra_sparsity=vra_sparsity,
+        vra_kernel_backend=vra_kernel_backend,
         env_overrides=env_overrides,
         attention_config=attention_config,
     )
@@ -320,4 +328,3 @@ def main(
             "Fetch attention dumps for local plotting:\n"
             f"  modal volume get fastvideo-hunyuan-attn {result.get('attn_volume_subdir', 'dump')} ./local_attn"
         )
-
